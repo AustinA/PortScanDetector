@@ -36,6 +36,7 @@ SYN_TYPE = [False, True, False, False, False, False, False, False]
 ACK_TYPE = [False, False, False, False, True, False, False, False]
 RST_ACK_TYPE = [False, False, True, False, True, False, False, False]
 SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
+NULL_TYPE = [False, False, False, False, False, False, False, False]
 
 
 def main():
@@ -64,8 +65,10 @@ def main():
                 # Reset processed flag to move to next scan type
                 reset_already_processed_flags(tcp_packets)
 
-                print "Full TCP handshakes on ports from SYN scan: " + str(full_tcp_scan)
-                print "Closed ports from TCP SYN scan: " + str(num_syn_ack_scans)
+                # Get the number of NULL scans
+                num_null_scans = get_num_null_scans(tcp_packets)
+
+                print_output(num_null_scans, 0, 0, num_syn_ack_scans, full_tcp_scan)
             else:
                 raise IOError()
     except IOError:
@@ -148,15 +151,7 @@ def get_num_syn_scans(tcp_packets):
                                                            packet[DESTINATION_PORT], packet[SOURCE_IP],
                                                            packet[SOURCE_PORT])
 
-                # Create a ordered conversation between packets based on the information from the selected packet
-                conversation = []
-                for x in from_source:
-                    if not x[ALREADY_PROCESSED]:
-                        conversation.append(x)
-                for y in from_destination:
-                    if not y[ALREADY_PROCESSED]:
-                        conversation.append(y)
-                conversation.sort(key=lambda x: x[0])
+                conversation = generate_tcp_conversation(from_source, from_destination)
 
                 # If the conversation length is 4, check to see if a full scan occured
                 if len(conversation) == 4:
@@ -193,6 +188,55 @@ def get_num_syn_scans(tcp_packets):
                                     already_scanned_ports.append(conversation[0][DESTINATION_PORT])
 
     return full_hand_shake_results, syn_rst_ack_results
+
+
+def get_num_null_scans(tcp_packets):
+    """
+    Gets the number unique ports scanned by a null scans
+
+    :param tcp_packets: The dictionary of tcp packets discovered in the pcap file
+    :return: Number of ports scanned by doing by a null scan
+    """
+    null_scan_numbers = 0
+
+    # For each macro conversation between two ip addresses
+    for key in tcp_packets:
+        # Packets already scanned
+        already_scanned_ports = []
+
+        # For each packet under the dictionary key
+        for packet in tcp_packets[key]:
+            if not packet[ALREADY_PROCESSED]:
+
+                # Filter out pertinent packets by the source ip, destination ip, source port, and destination port
+                from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
+                                                      packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
+                                                           packet[DESTINATION_PORT], packet[SOURCE_IP],
+                                                           packet[SOURCE_PORT])
+
+                conversation = generate_tcp_conversation(from_source, from_destination)
+
+                # Port was open!
+                if len(conversation) == 1:
+                    if conversation[0][TCP_FLAGS] == NULL_TYPE:
+                        if conversation[DESTINATION_PORT] not in already_scanned_ports:
+                            conversation[0][ALREADY_PROCESSED] = True
+                            already_scanned_ports.append(conversation[0][DESTINATION_PORT])
+                            null_scan_numbers = null_scan_numbers + 1
+
+                # Port was closed
+                if len(conversation) == 2:
+                    if conversation[0][TCP_FLAGS] == NULL_TYPE:
+                        if conversation[1][TCP_FLAGS] == RST_ACK_TYPE:
+                            if conversation[0][DESTINATION_PORT] not in already_scanned_ports:
+                                if ((conversation[0][DESTINATION_IP] == conversation[1][SOURCE_IP])
+                                        and (conversation[0][DESTINATION_PORT] == conversation[1][SOURCE_PORT])):
+                                    conversation[0][ALREADY_PROCESSED] = True
+                                    conversation[1][ALREADY_PROCESSED] = True
+                                    already_scanned_ports.append(conversation[0][DESTINATION_PORT])
+                                    null_scan_numbers = null_scan_numbers + 1
+    return null_scan_numbers
 
 
 ########################   PACKET PARSING HELPERS ############################################
@@ -254,7 +298,6 @@ def create_tcp_flag_array(tcp):
     return [fin_flag, syn_flag, rst_flag, psh_flag, ack_flag, urg_flag, ece_flag, cwr_flag]
 
 
-
 #########################  GENERAL HELPER FUNCTIONS ############################################
 
 def get_key(ip1, ip2):
@@ -308,6 +351,48 @@ def reset_already_processed_flags(packet_dict):
     for key in packet_dict:
         for packet in packet_dict[key]:
             packet[ALREADY_PROCESSED] = False
+
+
+def generate_tcp_conversation(from_source, from_destination):
+    """
+    Create a conversation (packets between two ip addresses in time stamp order
+
+    :param from_source: Packets from the source ip
+    :param from_destination: Packets from the destination ip
+    :return: List of packets in conversation
+    """
+    # Create a ordered conversation between packets based on the information from the selected packet
+    conversation = []
+    for x in from_source:
+        if not x[ALREADY_PROCESSED]:
+            conversation.append(x)
+    for y in from_destination:
+        if not y[ALREADY_PROCESSED]:
+            conversation.append(y)
+    conversation.sort(key=lambda x: x[0])
+    return conversation
+
+
+def print_output(nullscan, xmasscan, udpscan, halfopenscan, connectscan):
+    """
+    Prints output of project.
+
+    :param nullscan: Number of null scan ports
+    :param xmasscan: Number of xmas scan ports
+    :param udpscan:  Number of udp scan ports
+    :param halfopenscan: Number of half open scan ports
+    :param connectscan: Number of connect scan ports
+    """
+    if nullscan is not None:
+        print "Null: " + str(nullscan)
+    if xmasscan is not None:
+        print "XMAS: " + str(xmasscan)
+    if udpscan is not None:
+        print "UDP: " + str(udpscan)
+    if halfopenscan is not None:
+        print "Half-open (SYN): " + str(halfopenscan)
+    if connectscan is not None:
+        print "Connect: " + str(connectscan)
 
 
 if __name__ == "__main__":
