@@ -20,7 +20,6 @@ from optparse import OptionParser
 import dpkt
 import socket
 from collections import defaultdict
-from operator import itemgetter
 
 # Accessors for tcp packet list (these values represent a single tcp packet)
 TIMESTAMP = 0
@@ -31,12 +30,21 @@ DESTINATION_PORT = 4
 TCP_FLAGS = 5
 ALREADY_PROCESSED = 6
 
-# Flag arrays representing packet types in TCP
+# Flag arrays indices for accessing
+FIN_INDEX = 0
+SYN_INDEX = 1
+RST_INDEX = 2
+PSH_INDEX = 3
+ACK_INDEX = 4
+URG_INDEX = 5
+ECE_INDEX = 6
+CWR_INDEX = 7
+
 SYN_TYPE = [False, True, False, False, False, False, False, False]
-ACK_TYPE = [False, False, False, False, True, False, False, False]
-RST_ACK_TYPE = [False, False, True, False, True, False, False, False]
-SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
-NULL_TYPE = [False, False, False, False, False, False, False, False]
+
+SYN_PACKETS_VOLUME = 5
+SAMPLING_INVERVAL_SEC = 0.05
+UNIQUE_PORT_SYNS_ALLOWED = 10
 
 
 def main():
@@ -50,7 +58,7 @@ def main():
 
     try:
         # Attempt to open file
-        with open(file_name) as afile:
+        with open(file_name, 'rb') as afile:
             # Create new instance of pcap reader
             pcap_reader = dpkt.pcap.Reader(afile)
 
@@ -116,7 +124,6 @@ def process(pcap_reader):
 
     # Sort the packets numerically by time stamp
     for key in tcp_packets:
-        sorted(tcp_packets[key], key=itemgetter(0))
         tcp_packets[key].sort(key=lambda x: x[0])
 
     return tcp_packets, None
@@ -132,62 +139,25 @@ def get_num_syn_scans(tcp_packets):
     :param tcp_packets: The dictionary of tcp packets discovered in the pcap file
     :return: Number of ports scanned by doing a full TCP handshake, Number of ports scanned using half-scan techniques
     """
-    syn_rst_ack_results = 0
-    full_hand_shake_results = 0
 
-    # For each packet list for the dictionary key
+    closed_ports = 0
+    half_open_scans_results = 0
+    full_scan_results = 0
+
+    suspects = []
     for key in tcp_packets:
-        # Ports already scanned for packets in this particular key
-        already_scanned_ports = []
-        # For each packet under the dictionary key
-        for packet in tcp_packets[key]:
-            # If the packet has not already been looked at
-            if not packet[ALREADY_PROCESSED]:
-
-                # Filter out pertinent packets by the source ip, destination ip, source port, and destination port
-                from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
-                                                      packet[DESTINATION_IP], packet[DESTINATION_PORT])
-                from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
-                                                           packet[DESTINATION_PORT], packet[SOURCE_IP],
-                                                           packet[SOURCE_PORT])
-
-                conversation = generate_tcp_conversation(from_source, from_destination)
-
-                # If the conversation length is 4, check to see if a full scan occured
-                if len(conversation) == 4:
-                    if conversation[0][TCP_FLAGS] == SYN_TYPE:
-                        if conversation[0][DESTINATION_PORT] not in already_scanned_ports:
-                            if conversation[1][TCP_FLAGS] == SYN_ACK_TYPE:
-                                if conversation[2][TCP_FLAGS] == ACK_TYPE:
-                                    if conversation[3][TCP_FLAGS] == RST_ACK_TYPE:
-                                        if ((conversation[0][SOURCE_IP] == conversation[1][DESTINATION_IP])
-                                                and (conversation[1][SOURCE_IP] == conversation[2][DESTINATION_IP])
-                                                and (conversation[2][SOURCE_IP] == conversation[0][SOURCE_IP])
-                                                and (conversation[0][SOURCE_PORT] == conversation[2][SOURCE_PORT])
-                                                and (conversation[1][SOURCE_PORT] == conversation[2][DESTINATION_PORT])
-                                                and (conversation[2][SOURCE_PORT] == conversation[3][SOURCE_PORT])):
-                                            full_hand_shake_results = full_hand_shake_results + 1
-                                            conversation[0][ALREADY_PROCESSED] = True
-                                            conversation[1][ALREADY_PROCESSED] = True
-                                            conversation[2][ALREADY_PROCESSED] = True
-                                            conversation[3][ALREADY_PROCESSED] = True
-                                            already_scanned_ports.append(conversation[0][DESTINATION_PORT])
-
-                # If the packet number in the conversation is 2, check to see if the port scanned occured is half-scan
-                elif len(conversation) == 2:
-                    if conversation[0][TCP_FLAGS] == SYN_TYPE:
-                        if conversation[0][DESTINATION_PORT] not in already_scanned_ports:
-                            if conversation[1][TCP_FLAGS] == RST_ACK_TYPE:
-                                if ((conversation[0][SOURCE_IP] == conversation[1][DESTINATION_IP])
-                                        and (conversation[0][DESTINATION_IP] == conversation[1][SOURCE_IP])
-                                        and (conversation[0][SOURCE_PORT] == conversation[1][DESTINATION_PORT])
-                                        and (conversation[0][DESTINATION_PORT] == conversation[1][SOURCE_PORT])):
-                                    syn_rst_ack_results = syn_rst_ack_results + 1
-                                    conversation[0][ALREADY_PROCESSED] = True
-                                    conversation[1][ALREADY_PROCESSED] = True
-                                    already_scanned_ports.append(conversation[0][DESTINATION_PORT])
-
-    return full_hand_shake_results, syn_rst_ack_results
+        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key])
+        if len(packets_by_thresholds) > 0:
+            for ip_src in packets_by_thresholds:
+                packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
+                if len(packets_by_timeslice) > 0:
+                    for packet_group in packets_by_timeslice:
+                        num_syn_packs = get_syn_number(packet_group)
+                        if num_syn_packs > SYN_PACKETS_VOLUME:
+                            if ip_src not in suspects:
+                                suspects.append(ip_src)
+                                break
+    return 0, 0
 
 
 def get_num_null_scans(tcp_packets):
@@ -199,47 +169,62 @@ def get_num_null_scans(tcp_packets):
     """
     null_scan_numbers = 0
 
-    # For each macro conversation between two ip addresses
-    for key in tcp_packets:
-        # Packets already scanned
-        already_scanned_ports = []
-
-        # For each packet under the dictionary key
-        for packet in tcp_packets[key]:
-            if not packet[ALREADY_PROCESSED]:
-
-                # Filter out pertinent packets by the source ip, destination ip, source port, and destination port
-                from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
-                                                      packet[DESTINATION_IP], packet[DESTINATION_PORT])
-                from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
-                                                           packet[DESTINATION_PORT], packet[SOURCE_IP],
-                                                           packet[SOURCE_PORT])
-
-                conversation = generate_tcp_conversation(from_source, from_destination)
-
-                # Port was open!
-                if len(conversation) == 1:
-                    if conversation[0][TCP_FLAGS] == NULL_TYPE:
-                        if conversation[DESTINATION_PORT] not in already_scanned_ports:
-                            conversation[0][ALREADY_PROCESSED] = True
-                            already_scanned_ports.append(conversation[0][DESTINATION_PORT])
-                            null_scan_numbers = null_scan_numbers + 1
-
-                # Port was closed
-                if len(conversation) == 2:
-                    if conversation[0][TCP_FLAGS] == NULL_TYPE:
-                        if conversation[1][TCP_FLAGS] == RST_ACK_TYPE:
-                            if conversation[0][DESTINATION_PORT] not in already_scanned_ports:
-                                if ((conversation[0][DESTINATION_IP] == conversation[1][SOURCE_IP])
-                                        and (conversation[0][DESTINATION_PORT] == conversation[1][SOURCE_PORT])):
-                                    conversation[0][ALREADY_PROCESSED] = True
-                                    conversation[1][ALREADY_PROCESSED] = True
-                                    already_scanned_ports.append(conversation[0][DESTINATION_PORT])
-                                    null_scan_numbers = null_scan_numbers + 1
     return null_scan_numbers
 
 
 ########################   PACKET PARSING HELPERS ############################################
+
+def get_syn_number(packets):
+    num_syn_packs = 0
+    if len(packets) > 0:
+        for packet in packets:
+            if packet[TCP_FLAGS] == SYN_TYPE:
+                num_syn_packs += 1
+    return num_syn_packs
+
+
+def breakup_packets_by_threshold(tcp_packets):
+    ip_addresses = get_all_ip_addresses(tcp_packets)
+    ip_to_time_slices = defaultdict(list)
+    for ip_address in ip_addresses:
+        all_packets = find_packets_by_source_ip(tcp_packets, ip_address)
+
+        if len(all_packets) > 0:
+            all_packets.sort(key=lambda x: x[0])
+
+            packet_timeslices = []
+            left_overs = []
+            time_slice_index = 0
+            threshold = all_packets[0][TIMESTAMP] + SAMPLING_INVERVAL_SEC
+            current_time = all_packets[0][TIMESTAMP]
+            current_index = 0
+
+            cant_split = False
+            if all_packets[len(all_packets) - 1][TIMESTAMP] - current_time <= SAMPLING_INVERVAL_SEC:
+                cant_split = True
+            if not cant_split:
+                for i in range(0, len(all_packets)):
+                    if current_time >= threshold:
+                        packet_timeslices.append([])
+                        for x in range(current_index, i):
+                            packet_timeslices[time_slice_index].append(all_packets[x])
+                        current_index = i
+                        current_time = all_packets[i][TIMESTAMP]
+                        threshold = current_time + SAMPLING_INVERVAL_SEC
+                        time_slice_index += 1
+                    else:
+                        current_time = all_packets[i][TIMESTAMP]
+
+                packets_timesliced = 0
+                for i in range(0, len(packet_timeslices)):
+                    packets_timesliced += len(packet_timeslices[i])
+                for i in range(packets_timesliced, len(all_packets)):
+                    left_overs.append(all_packets[i])
+
+            ip_to_time_slices[ip_address] = [packet_timeslices, left_overs]
+
+    return ip_to_time_slices
+
 
 def find_packets_by_ip_port(tcp_packets, source_ip, source_port, destination_ip, destination_port):
     """
@@ -258,6 +243,25 @@ def find_packets_by_ip_port(tcp_packets, source_ip, source_port, destination_ip,
                 and (packet[DESTINATION_IP] == destination_ip) and (packet[DESTINATION_PORT] == destination_port)):
             found.append(packet)
 
+    return found
+
+
+def find_packets_by_source_ip(tcp_packets, ip):
+    found = []
+    for packet in tcp_packets:
+        if packet[SOURCE_IP] == ip:
+            found.append(packet)
+    return found
+
+
+def get_all_ip_addresses(tcp_packets):
+    found = []
+    for packet in tcp_packets:
+        if packet[SOURCE_IP] not in found:
+            found.append(packet[SOURCE_IP])
+
+        if packet[DESTINATION_IP] not in found:
+            found.append(packet[DESTINATION_IP])
     return found
 
 
