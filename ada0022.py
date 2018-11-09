@@ -44,11 +44,13 @@ SYN_TYPE = [False, True, False, False, False, False, False, False]
 RST_ACK_TYPE = [False, False, True, False, True, False, False, False]
 SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
 NULL_TYPE = [False, False, False, False, False, False, False, False]
+XMAS_TYPE = [True, False, False, True, False, True, False, False]
 
 SYN_PACKETS_VOLUME = 5
 SAMPLING_INVERVAL_SEC = 0.05
 
 NULL_PACKETS_VOLUME = 5
+XMAS_PACKETS_VOLUME = 5
 
 
 def main():
@@ -80,6 +82,13 @@ def main():
                 # Get the number of NULL scans
                 num_null_scans = get_num_null_scans(tcp_packets)
 
+                # Reset processed flag to move to next scan type
+                reset_already_processed_flags(tcp_packets)
+
+                # Get the number of XMAS scans
+                num_xmas_scans = get_num_xmas_scans(tcp_packets)
+
+                # Based on if a half-scan or full-scan was returned, lump the closed ports results into the final result
                 printable_half = 0
                 printable_connect = 0
                 if half_tcp_scans > full_tcp_scans:
@@ -87,7 +96,7 @@ def main():
                 else:
                     printable_connect = full_tcp_scans + closed_tcp_port_scans
 
-                print_output(num_null_scans, 0, 0, printable_half, printable_connect)
+                print_output(num_null_scans, num_xmas_scans, 0, printable_half, printable_connect)
             else:
                 raise IOError()
     except IOError:
@@ -141,6 +150,58 @@ def process(pcap_reader):
 
 
 #####################     SCAN TYPE DETERMINATORS   #############################################
+
+def get_num_xmas_scans(tcp_packets):
+    """
+    Gets the number unique ports scanned by a null scans
+
+    :param tcp_packets: The dictionary of tcp packets discovered in the pcap file
+    :return: Number of ports scanned by doing by a null scan
+    """
+    closed_xmas_scan = 0
+    open_xmas_scan = 0
+
+    suspects = []
+    ip_to_ports_scanned = defaultdict(list)
+    for key in tcp_packets:
+        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key])
+        if len(packets_by_thresholds) > 0:
+            for ip_src in packets_by_thresholds:
+                packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
+                if len(packets_by_timeslice) > 0:
+                    for packet_group in packets_by_timeslice:
+                        num_xmas_packs = get_xmas_number(packet_group)
+                        if num_xmas_packs > XMAS_PACKETS_VOLUME:
+                            if ip_src not in suspects:
+                                suspects.append(ip_src)
+                                break
+        for ip_addr in suspects:
+            packets_from_ip = find_packets_by_source_ip(tcp_packets[key], ip_addr)
+            for packet in packets_from_ip:
+
+                if not packet[ALREADY_PROCESSED]:
+                    from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
+                                                          packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                    from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
+                                                               packet[DESTINATION_PORT],
+                                                               packet[SOURCE_IP], packet[SOURCE_PORT])
+
+                    conversation = generate_tcp_conversation(from_source, from_destination)
+
+                    if is_closed_xmas_scan(conversation):
+                        to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if to_store not in ip_to_ports_scanned[ip_addr]:
+                            ip_to_ports_scanned[ip_addr].append(to_store)
+                            closed_xmas_scan += 1
+                            mark_as_processed(conversation)
+                    elif is_open_xmas_scan(conversation):
+                        to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if to_store not in ip_to_ports_scanned[ip_addr]:
+                            ip_to_ports_scanned[ip_addr].append(to_store)
+                            open_xmas_scan += 1
+                            mark_as_processed(conversation)
+
+    return closed_xmas_scan + open_xmas_scan
 
 
 def get_num_syn_scans(tcp_packets):
@@ -261,6 +322,43 @@ def get_num_null_scans(tcp_packets):
 
 
 ########################   PACKET PARSING HELPERS ############################################
+
+def is_open_xmas_scan(conversation):
+    has_null = []
+    has_rst = []
+
+    for packet in conversation:
+        if packet[TCP_FLAGS] == XMAS_TYPE:
+            has_null.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][RST_INDEX] is True:
+            has_rst.append(packet)
+
+    if len(has_null) > 0 and len(has_rst) == 0:
+        return True
+
+    return False
+
+
+def is_closed_xmas_scan(conversation):
+    has_null = []
+    has_rst = []
+
+    for packet in conversation:
+        if packet[TCP_FLAGS] == XMAS_TYPE:
+            has_null.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][RST_INDEX] is True:
+            has_rst.append(packet)
+
+    for null in has_null:
+        for rst in has_rst:
+            if null[SOURCE_IP] == rst[DESTINATION_IP] and null[SOURCE_PORT] == rst[DESTINATION_PORT]:
+                return True
+    return False
+
 
 def is_open_null_scan(conversation):
     has_null = []
@@ -406,6 +504,15 @@ def get_null_number(packets):
     if len(packets) > 0:
         for packet in packets:
             if packet[TCP_FLAGS] == NULL_TYPE:
+                num_syn_packs += 1
+    return num_syn_packs
+
+
+def get_xmas_number(packets):
+    num_syn_packs = 0
+    if len(packets) > 0:
+        for packet in packets:
+            if packet[TCP_FLAGS] == XMAS_TYPE:
                 num_syn_packs += 1
     return num_syn_packs
 
