@@ -43,9 +43,12 @@ CWR_INDEX = 7
 SYN_TYPE = [False, True, False, False, False, False, False, False]
 RST_ACK_TYPE = [False, False, True, False, True, False, False, False]
 SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
+NULL_TYPE = [False, False, False, False, False, False, False, False]
+
 SYN_PACKETS_VOLUME = 5
 SAMPLING_INVERVAL_SEC = 0.05
-UNIQUE_PORT_SYNS_ALLOWED = 10
+
+NULL_PACKETS_VOLUME = 5
 
 
 def main():
@@ -77,7 +80,14 @@ def main():
                 # Get the number of NULL scans
                 num_null_scans = get_num_null_scans(tcp_packets)
 
-                print_output(num_null_scans, 0, 0, num_syn_ack_scans, full_tcp_scan)
+                printable_half = 0
+                printable_connect = 0
+                if half_tcp_scans > full_tcp_scans:
+                    printable_half = half_tcp_scans + closed_tcp_port_scans
+                else:
+                    printable_connect = full_tcp_scans + closed_tcp_port_scans
+
+                print_output(num_null_scans, 0, 0, printable_half, printable_connect)
             else:
                 raise IOError()
     except IOError:
@@ -174,19 +184,25 @@ def get_num_syn_scans(tcp_packets):
                     conversation = generate_tcp_conversation(from_source, from_destination)
 
                     if is_full_port_scan(conversation):
-                        ip_to_ports_scanned[ip_addr].append((packet[DESTINATION_IP], packet[DESTINATION_PORT]))
-                        full_scan_results += 1
-                        mark_as_processed(conversation)
+                        to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if to_store not in ip_to_ports_scanned[ip_addr]:
+                            ip_to_ports_scanned[ip_addr].append(to_store)
+                            full_scan_results += 1
+                            mark_as_processed(conversation)
 
                     elif is_half_port_scan(conversation):
-                        ip_to_ports_scanned[ip_addr].append((packet[DESTINATION_IP], packet[DESTINATION_PORT]))
-                        half_open_scans_results += 1
-                        mark_as_processed(conversation)
+                        to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if to_store not in ip_to_ports_scanned[ip_addr]:
+                            ip_to_ports_scanned[ip_addr].append(to_store)
+                            half_open_scans_results += 1
+                            mark_as_processed(conversation)
 
                     elif is_closed_port_scan(conversation):
-                        ip_to_ports_scanned[ip_addr].append((packet[DESTINATION_IP], packet[DESTINATION_PORT]))
-                        closed_ports += 1
-                        mark_as_processed(conversation)
+                        to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if to_store not in ip_to_ports_scanned[ip_addr]:
+                            ip_to_ports_scanned[ip_addr].append(to_store)
+                            closed_ports += 1
+                            mark_as_processed(conversation)
 
     return closed_ports, half_open_scans_results, full_scan_results
 
@@ -198,12 +214,90 @@ def get_num_null_scans(tcp_packets):
     :param tcp_packets: The dictionary of tcp packets discovered in the pcap file
     :return: Number of ports scanned by doing by a null scan
     """
-    null_scan_numbers = 0
+    closed_null_scan = 0
+    open_null_scan = 0
 
-    return null_scan_numbers
+    suspects = []
+    ip_to_ports_scanned = defaultdict(list)
+    for key in tcp_packets:
+        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key])
+        if len(packets_by_thresholds) > 0:
+            for ip_src in packets_by_thresholds:
+                packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
+                if len(packets_by_timeslice) > 0:
+                    for packet_group in packets_by_timeslice:
+                        num_null_packs = get_null_number(packet_group)
+                        if num_null_packs > NULL_PACKETS_VOLUME:
+                            if ip_src not in suspects:
+                                suspects.append(ip_src)
+                                break
+        for ip_addr in suspects:
+            packets_from_ip = find_packets_by_source_ip(tcp_packets[key], ip_addr)
+            for packet in packets_from_ip:
+
+                if not packet[ALREADY_PROCESSED]:
+                    from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
+                                                          packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                    from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
+                                                               packet[DESTINATION_PORT],
+                                                               packet[SOURCE_IP], packet[SOURCE_PORT])
+
+                    conversation = generate_tcp_conversation(from_source, from_destination)
+
+                    if is_closed_null_scan(conversation):
+                        to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if to_store not in ip_to_ports_scanned[ip_addr]:
+                            ip_to_ports_scanned[ip_addr].append(to_store)
+                            closed_null_scan += 1
+                            mark_as_processed(conversation)
+                    elif is_open_null_scan(conversation):
+                        to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if to_store not in ip_to_ports_scanned[ip_addr]:
+                            ip_to_ports_scanned[ip_addr].append(to_store)
+                            open_null_scan += 1
+                            mark_as_processed(conversation)
+
+    return closed_null_scan + open_null_scan
 
 
 ########################   PACKET PARSING HELPERS ############################################
+
+def is_open_null_scan(conversation):
+    has_null = []
+    has_rst = []
+
+    for packet in conversation:
+        if packet[TCP_FLAGS] == NULL_TYPE:
+            has_null.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][RST_INDEX] is True:
+            has_rst.append(packet)
+
+    if len(has_null) > 0 and len(has_rst) == 0:
+        return True
+
+    return False
+
+
+def is_closed_null_scan(conversation):
+    has_null = []
+    has_rst = []
+
+    for packet in conversation:
+        if packet[TCP_FLAGS] == NULL_TYPE:
+            has_null.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][RST_INDEX] is True:
+            has_rst.append(packet)
+
+    for null in has_null:
+        for rst in has_rst:
+            if null[SOURCE_IP] == rst[DESTINATION_IP] and null[SOURCE_PORT] == rst[DESTINATION_PORT]:
+                return True
+    return False
+
 
 def is_full_port_scan(conversation):
     has_syn = []
@@ -303,6 +397,15 @@ def get_syn_number(packets):
     if len(packets) > 0:
         for packet in packets:
             if packet[TCP_FLAGS] == SYN_TYPE:
+                num_syn_packs += 1
+    return num_syn_packs
+
+
+def get_null_number(packets):
+    num_syn_packs = 0
+    if len(packets) > 0:
+        for packet in packets:
+            if packet[TCP_FLAGS] == NULL_TYPE:
                 num_syn_packs += 1
     return num_syn_packs
 
@@ -492,9 +595,11 @@ def generate_tcp_conversation(from_source, from_destination):
     # Create a ordered conversation between packets based on the information from the selected packet
     conversation = []
     for x in from_source:
-        conversation.append(x)
+        if not x[ALREADY_PROCESSED]:
+            conversation.append(x)
     for y in from_destination:
-        conversation.append(y)
+        if not y[ALREADY_PROCESSED]:
+            conversation.append(y)
     conversation.sort(key=lambda x: x[0])
     return conversation
 
