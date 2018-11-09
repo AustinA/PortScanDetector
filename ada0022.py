@@ -41,7 +41,8 @@ ECE_INDEX = 6
 CWR_INDEX = 7
 
 SYN_TYPE = [False, True, False, False, False, False, False, False]
-
+RST_ACK_TYPE = [False, False, True, False, True, False, False, False]
+SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
 SYN_PACKETS_VOLUME = 5
 SAMPLING_INVERVAL_SEC = 0.05
 UNIQUE_PORT_SYNS_ALLOWED = 10
@@ -68,7 +69,7 @@ def main():
                 (tcp_packets, udp_packets) = process(pcap_reader)
 
                 # Get the number of SYN scans, splitting between a full handshake and half scans
-                full_tcp_scan, num_syn_ack_scans = get_num_syn_scans(tcp_packets)
+                closed_tcp_port_scans, half_tcp_scans, full_tcp_scans = get_num_syn_scans(tcp_packets)
 
                 # Reset processed flag to move to next scan type
                 reset_already_processed_flags(tcp_packets)
@@ -145,6 +146,7 @@ def get_num_syn_scans(tcp_packets):
     full_scan_results = 0
 
     suspects = []
+    ip_to_ports_scanned = defaultdict(list)
     for key in tcp_packets:
         packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key])
         if len(packets_by_thresholds) > 0:
@@ -157,7 +159,36 @@ def get_num_syn_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
-    return 0, 0
+        for ip_addr in suspects:
+            packets_from_ip = find_packets_by_source_ip(tcp_packets[key], ip_addr)
+            for packet in packets_from_ip:
+
+                if not packet[ALREADY_PROCESSED]:
+
+                    from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
+                                                          packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                    from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
+                                                               packet[DESTINATION_PORT],
+                                                               packet[SOURCE_IP], packet[SOURCE_PORT])
+
+                    conversation = generate_tcp_conversation(from_source, from_destination)
+
+                    if is_full_port_scan(conversation):
+                        ip_to_ports_scanned[ip_addr].append((packet[DESTINATION_IP], packet[DESTINATION_PORT]))
+                        full_scan_results += 1
+                        mark_as_processed(conversation)
+
+                    elif is_half_port_scan(conversation):
+                        ip_to_ports_scanned[ip_addr].append((packet[DESTINATION_IP], packet[DESTINATION_PORT]))
+                        half_open_scans_results += 1
+                        mark_as_processed(conversation)
+
+                    elif is_closed_port_scan(conversation):
+                        ip_to_ports_scanned[ip_addr].append((packet[DESTINATION_IP], packet[DESTINATION_PORT]))
+                        closed_ports += 1
+                        mark_as_processed(conversation)
+
+    return closed_ports, half_open_scans_results, full_scan_results
 
 
 def get_num_null_scans(tcp_packets):
@@ -173,6 +204,99 @@ def get_num_null_scans(tcp_packets):
 
 
 ########################   PACKET PARSING HELPERS ############################################
+
+def is_full_port_scan(conversation):
+    has_syn = []
+    has_rst = []
+    has_syn_ack = []
+    has_ack = []
+
+    for packet in conversation:
+        if packet[TCP_FLAGS] == SYN_TYPE:
+            has_syn.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][SYN_INDEX] is True and packet[TCP_FLAGS][ACK_INDEX] is True:
+            has_syn_ack.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][RST_INDEX] == 1:
+            has_rst.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][ACK_INDEX] is True and packet[TCP_FLAGS][SYN_INDEX] is not True:
+            has_ack.append(packet)
+
+    for syn_packet in has_syn:
+        for syn_ack_packet in has_syn_ack:
+            if ((syn_packet[DESTINATION_IP] == syn_ack_packet[SOURCE_IP])
+                    and (syn_packet[DESTINATION_PORT] == syn_ack_packet[SOURCE_PORT])):
+
+                for ack_packet in has_ack:
+                    if ((ack_packet[SOURCE_IP] == syn_ack_packet[DESTINATION_IP])
+                            and (ack_packet[SOURCE_PORT] == syn_ack_packet[DESTINATION_PORT])):
+
+                        for rst_packet in has_rst:
+                            if ((syn_packet[SOURCE_IP] == rst_packet[SOURCE_IP])
+                                    and (syn_packet[SOURCE_PORT] == rst_packet[SOURCE_PORT])):
+                                return True
+    return False
+
+
+def is_half_port_scan(conversation):
+    has_syn = []
+    has_rst = []
+    has_syn_ack = []
+
+    for packet in conversation:
+        if packet[TCP_FLAGS] == SYN_TYPE:
+            has_syn.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][SYN_INDEX] is True and packet[TCP_FLAGS][ACK_INDEX] is True:
+            has_syn_ack.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][RST_INDEX] == 1:
+            has_rst.append(packet)
+
+    for syn_packet in has_syn:
+        for syn_ack_packet in has_syn_ack:
+            if ((syn_packet[DESTINATION_IP] == syn_ack_packet[SOURCE_IP])
+                    and (syn_packet[DESTINATION_PORT] == syn_ack_packet[SOURCE_PORT])):
+
+                for rst_packet in has_rst:
+                    if ((syn_packet[SOURCE_IP] == rst_packet[SOURCE_IP])
+                            and (syn_packet[SOURCE_PORT] == rst_packet[SOURCE_PORT])):
+                        return True
+    return False
+
+
+def is_closed_port_scan(conversation):
+    has_syn = []
+    has_rst_ack = []
+
+    for packet in conversation:
+        if packet[TCP_FLAGS] == SYN_TYPE:
+            has_syn.append(packet)
+
+    for packet in conversation:
+        if packet[TCP_FLAGS][RST_INDEX] == 1:
+            has_rst_ack.append(packet)
+
+    for syn_packet in has_syn:
+        for rst_ack_packet in has_rst_ack:
+            if ((syn_packet[DESTINATION_IP] == rst_ack_packet[SOURCE_IP])
+                    and (syn_packet[DESTINATION_PORT] == rst_ack_packet[SOURCE_PORT])):
+                return True
+
+    return False
+
+
+def mark_as_processed(conversation):
+    for packet in conversation:
+        packet[ALREADY_PROCESSED] = True
+
 
 def get_syn_number(packets):
     num_syn_packs = 0
@@ -368,11 +492,9 @@ def generate_tcp_conversation(from_source, from_destination):
     # Create a ordered conversation between packets based on the information from the selected packet
     conversation = []
     for x in from_source:
-        if not x[ALREADY_PROCESSED]:
-            conversation.append(x)
+        conversation.append(x)
     for y in from_destination:
-        if not y[ALREADY_PROCESSED]:
-            conversation.append(y)
+        conversation.append(y)
     conversation.sort(key=lambda x: x[0])
     return conversation
 
