@@ -28,6 +28,7 @@ SOURCE_PORT = 2
 DESTINATION_IP = 3
 DESTINATION_PORT = 4
 TCP_FLAGS = 5
+UDP_INFO = 5
 ALREADY_PROCESSED = 6
 
 # Flag arrays indices for accessing
@@ -46,11 +47,15 @@ SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
 NULL_TYPE = [False, False, False, False, False, False, False, False]
 XMAS_TYPE = [True, False, False, True, False, True, False, False]
 
-SYN_PACKETS_VOLUME = 5
 SAMPLING_INVERVAL_SEC = 0.05
 
+SYN_PACKETS_VOLUME = 5
 NULL_PACKETS_VOLUME = 5
 XMAS_PACKETS_VOLUME = 5
+
+UDP_SAMPLING_INTERVAL_SEC = 5
+ICMP_UNIQUE_PORTS_VOLUME = 2
+UDP_UNIQUE_PORTS_VOLUME = 3
 
 
 def main():
@@ -88,6 +93,9 @@ def main():
                 # Get the number of XMAS scans
                 num_xmas_scans = get_num_xmas_scans(tcp_packets)
 
+                # Get the number of UDP scans
+                num_udp_scans = get_num_udp_scans(udp_packets)
+
                 # Based on if a half-scan or full-scan was returned, lump the closed ports results into the final result
                 printable_half = 0
                 printable_connect = 0
@@ -96,7 +104,7 @@ def main():
                 else:
                     printable_connect = full_tcp_scans + closed_tcp_port_scans
 
-                print_output(num_null_scans, num_xmas_scans, 0, printable_half, printable_connect)
+                print_output(num_null_scans, num_xmas_scans, num_udp_scans, printable_half, printable_connect)
             else:
                 raise IOError()
     except IOError:
@@ -115,6 +123,7 @@ def process(pcap_reader):
 
     # Create default dictionary
     tcp_packets = defaultdict(list)
+    udp_packets = defaultdict(list)
 
     # For each timestamp and raw byte data in a packet
     for ts, buf in pcap_reader:
@@ -140,16 +149,91 @@ def process(pcap_reader):
                 [ts, socket.inet_ntoa(ip_packet.src), ip_packet.data.sport, socket.inet_ntoa(ip_packet.dst),
                  ip_packet.data.dport, create_tcp_flag_array(ip_packet.data), False])
 
-            # TODO:  Add UDP packet support
+        elif protocol == dpkt.ip.IP_PROTO_UDP:
+            key = get_key(socket.inet_ntoa(ip_packet.src), socket.inet_ntoa(ip_packet.dst))
+            udp_packets[key].append(
+                [ts, socket.inet_ntoa(ip_packet.src), ip_packet.data.sport, socket.inet_ntoa(ip_packet.dst),
+                 ip_packet.data.dport, (protocol, -1, -1), False])
+        elif protocol == dpkt.ip.IP_PROTO_ICMP:
+            key = get_key(socket.inet_ntoa(ip_packet.src), socket.inet_ntoa(ip_packet.dst))
+            icmp = ip_packet.data
+            if icmp.data is not None:
+                if icmp.data.data is not None:
+                    if icmp.data.data.data is not None:
+                        try:
+                            dst_ip = socket.inet_ntoa(icmp.data.data.dst)
+                            src_ip = socket.inet_ntoa(icmp.data.data.src)
+                            dst_port = icmp.data.data.data.dport
+                            src_port = icmp.data.data.data.sport
+                            udp_packets[key].append(
+                                [ts, src_ip, src_port, dst_ip,
+                                 dst_port, (protocol, icmp.type, icmp.code), False])
+                        except:
+                            pass
 
     # Sort the packets numerically by time stamp
     for key in tcp_packets:
         tcp_packets[key].sort(key=lambda x: x[0])
 
-    return tcp_packets, None
+    for key in udp_packets:
+        udp_packets[key].sort(key=lambda x: x[0])
+
+    return tcp_packets, udp_packets
 
 
 #####################     SCAN TYPE DETERMINATORS   #############################################
+
+def get_num_udp_scans(udp_packets):
+    suspects = defaultdict(list)
+    ip_to_ports_scanned = defaultdict(list)
+
+    udp_closed = 0
+    udp_open = 0
+
+    for key in udp_packets:
+        packets_by_thresholds = breakup_packets_by_threshold(udp_packets[key], UDP_SAMPLING_INTERVAL_SEC)
+        if len(packets_by_thresholds) > 0:
+            for ip_src in packets_by_thresholds:
+                packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
+                if len(packets_by_timeslice) > 0:
+                    for packet_group in packets_by_timeslice:
+                        num_unique_icmp_ports = num_unique_icmp_ports_not_found(packet_group)
+
+                        if len(num_unique_icmp_ports) > ICMP_UNIQUE_PORTS_VOLUME:
+                            if ip_src not in suspects:
+                                suspects[ip_src] = num_unique_icmp_ports
+                            else:
+                                for port in num_unique_icmp_ports:
+                                    if port not in suspects[ip_src]:
+                                        suspects[ip_src].append(port)
+
+                        num_unique_ports = num_unique_udp_ports(packet_group)
+                        if len(num_unique_ports) > UDP_UNIQUE_PORTS_VOLUME:
+                            if ip_src not in suspects:
+                                suspects[ip_src] = num_unique_ports
+                            else:
+                                for port in num_unique_ports:
+                                    if port not in suspects[ip_src]:
+                                        suspects[ip_src].append(port)
+                if len(left_overs) > 0:
+                    num_unique_icmp_ports = num_unique_icmp_ports_not_found(left_overs)
+                    if ip_src in suspects:
+                        for port in num_unique_icmp_ports:
+                            if port not in suspects[ip_src]:
+                                suspects[ip_src].append(port)
+
+                    uniqe_pts = num_unique_udp_ports(left_overs)
+                    if ip_src in suspects:
+                        for port in uniqe_pts:
+                            if port not in suspects[ip_src]:
+                                suspects[ip_src].append(port)
+
+    total = 0
+    for entries in suspects:
+        total += len(suspects[entries])
+    return total
+
+
 
 def get_num_xmas_scans(tcp_packets):
     """
@@ -164,7 +248,7 @@ def get_num_xmas_scans(tcp_packets):
     suspects = []
     ip_to_ports_scanned = defaultdict(list)
     for key in tcp_packets:
-        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key])
+        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key], SAMPLING_INVERVAL_SEC)
         if len(packets_by_thresholds) > 0:
             for ip_src in packets_by_thresholds:
                 packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
@@ -219,7 +303,7 @@ def get_num_syn_scans(tcp_packets):
     suspects = []
     ip_to_ports_scanned = defaultdict(list)
     for key in tcp_packets:
-        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key])
+        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key], SAMPLING_INVERVAL_SEC)
         if len(packets_by_thresholds) > 0:
             for ip_src in packets_by_thresholds:
                 packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
@@ -281,7 +365,7 @@ def get_num_null_scans(tcp_packets):
     suspects = []
     ip_to_ports_scanned = defaultdict(list)
     for key in tcp_packets:
-        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key])
+        packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key], SAMPLING_INVERVAL_SEC)
         if len(packets_by_thresholds) > 0:
             for ip_src in packets_by_thresholds:
                 packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
@@ -322,6 +406,44 @@ def get_num_null_scans(tcp_packets):
 
 
 ########################   PACKET PARSING HELPERS ############################################
+
+def udp_port_closed(conversation):
+    icmps = []
+    udps = []
+
+    for packet in conversation:
+        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_UDP:
+            udps.append(udps)
+
+    for packet in conversation:
+        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_ICMP:
+            if packet[UDP_INFO][1] == 3 and packet[UDP_INFO][2] == 3:
+                icmps.append(packet)
+
+    if len(udps) > 0 and len(icmps) > 0:
+        return True
+
+    return False
+
+
+def udp_port_open(conversation):
+    icmps = []
+    udps = []
+
+    for packet in conversation:
+        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_UDP:
+            udps.append(udps)
+
+    for packet in conversation:
+        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_ICMP:
+            if packet[UDP_INFO][1] == 3 and packet[UDP_INFO][2] == 3:
+                icmps.append(packet)
+
+    if len(udps) > 0 and len(icmps) == 0:
+        return True
+
+    return False
+
 
 def is_open_xmas_scan(conversation):
     has_null = []
@@ -508,6 +630,29 @@ def get_null_number(packets):
     return num_syn_packs
 
 
+def num_unique_icmp_ports_not_found(packets):
+    ports_seen = []
+    if len(packets) > 0:
+        for packet in packets:
+            if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_ICMP:
+                if packet[UDP_INFO][1] == 3 and packet[UDP_INFO][2] == 3:
+                    entry = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                    if not entry in ports_seen:
+                        ports_seen.append(entry)
+        return ports_seen
+
+
+def num_unique_udp_ports(packets):
+    ports_seen = []
+    if len(packets) > 0:
+        for packet in packets:
+            entry = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+            if entry not in ports_seen:
+                ports_seen.append(entry)
+
+    return ports_seen
+
+
 def get_xmas_number(packets):
     num_syn_packs = 0
     if len(packets) > 0:
@@ -517,7 +662,7 @@ def get_xmas_number(packets):
     return num_syn_packs
 
 
-def breakup_packets_by_threshold(tcp_packets):
+def breakup_packets_by_threshold(tcp_packets, sampling_interval):
     ip_addresses = get_all_ip_addresses(tcp_packets)
     ip_to_time_slices = defaultdict(list)
     for ip_address in ip_addresses:
@@ -529,12 +674,12 @@ def breakup_packets_by_threshold(tcp_packets):
             packet_timeslices = []
             left_overs = []
             time_slice_index = 0
-            threshold = all_packets[0][TIMESTAMP] + SAMPLING_INVERVAL_SEC
+            threshold = all_packets[0][TIMESTAMP] + sampling_interval
             current_time = all_packets[0][TIMESTAMP]
             current_index = 0
 
             cant_split = False
-            if all_packets[len(all_packets) - 1][TIMESTAMP] - current_time <= SAMPLING_INVERVAL_SEC:
+            if all_packets[len(all_packets) - 1][TIMESTAMP] - current_time <= sampling_interval:
                 cant_split = True
             if not cant_split:
                 for i in range(0, len(all_packets)):
@@ -544,7 +689,7 @@ def breakup_packets_by_threshold(tcp_packets):
                             packet_timeslices[time_slice_index].append(all_packets[x])
                         current_index = i
                         current_time = all_packets[i][TIMESTAMP]
-                        threshold = current_time + SAMPLING_INVERVAL_SEC
+                        threshold = current_time + sampling_interval
                         time_slice_index += 1
                     else:
                         current_time = all_packets[i][TIMESTAMP]
@@ -611,7 +756,9 @@ def is_valid_packet_type(ethernet_data):
         return None, None
 
     ip_packet = ethernet_data.data
-    if (ip_packet.p == dpkt.ip.IP_PROTO_TCP) or (ip_packet.p == dpkt.ip.IP_PROTO_UDP):
+    if ((ip_packet.p == dpkt.ip.IP_PROTO_TCP)
+            or (ip_packet.p == dpkt.ip.IP_PROTO_UDP)
+            or (ip_packet.p == dpkt.ip.IP_PROTO_ICMP)):
         return ip_packet.p, ip_packet
 
     return None, None
