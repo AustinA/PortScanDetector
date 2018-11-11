@@ -1,0 +1,108 @@
+NULL_SCAN
+root@kali:~# nmap -sN 192.168.56.102 192.168.56.103 -p 1-5000
+Starting Nmap 7.70 ( https://nmap.org ) at 2018-11-11 15:22 EST
+Nmap scan report for 192.168.56.102
+Host is up (0.00017s latency).
+Not shown: 4998 closed ports
+PORT     STATE         SERVICE
+1112/tcp open|filtered msql
+1839/tcp open|filtered netopia-vo1
+MAC Address: 08:00:27:5D:F8:9C (Oracle VirtualBox virtual NIC)
+
+Nmap scan report for 192.168.56.103
+Host is up (0.00010s latency).
+Not shown: 4998 closed ports
+PORT     STATE         SERVICE
+4443/tcp open|filtered pharos
+4445/tcp open|filtered upnotifyp
+MAC Address: 08:00:27:E0:60:7C (Oracle VirtualBox virtual NIC)
+
+Nmap done: 2 IP addresses (2 hosts up) scanned in 15.65 seconds
+
+
+XMAS SCAN
+root@kali:~# nmap -sX 192.168.56.102 192.168.56.103 -p 1-5000
+Starting Nmap 7.70 ( https://nmap.org ) at 2018-11-11 15:26 EST
+Nmap scan report for 192.168.56.102
+Host is up (0.000074s latency).
+Not shown: 4998 closed ports
+PORT     STATE         SERVICE
+1112/tcp open|filtered msql
+1839/tcp open|filtered netopia-vo1
+MAC Address: 08:00:27:5D:F8:9C (Oracle VirtualBox virtual NIC)
+
+Nmap scan report for 192.168.56.103
+Host is up (0.00040s latency).
+Not shown: 4998 closed ports
+PORT     STATE         SERVICE
+4443/tcp open|filtered pharos
+4445/tcp open|filtered upnotifyp
+MAC Address: 08:00:27:E0:60:7C (Oracle VirtualBox virtual NIC)
+
+Nmap done: 2 IP addresses (2 hosts up) scanned in 15.15 seconds
+
+
+HALF_SYN
+root@kali:~# nmap -sS 192.168.56.102 192.168.56.103 -p 1-5000
+Starting Nmap 7.70 ( https://nmap.org ) at 2018-11-11 15:28 EST
+Nmap scan report for 192.168.56.102
+Host is up (0.00044s latency).
+Not shown: 4998 closed ports
+PORT     STATE SERVICE
+1112/tcp open  msql
+1839/tcp open  netopia-vo1
+MAC Address: 08:00:27:5D:F8:9C (Oracle VirtualBox virtual NIC)
+
+Nmap scan report for 192.168.56.103
+Host is up (0.00034s latency).
+Not shown: 4998 closed ports
+PORT     STATE SERVICE
+4443/tcp open  pharos
+4445/tcp open  upnotifyp
+MAC Address: 08:00:27:E0:60:7C (Oracle VirtualBox virtual NIC)
+
+Nmap done: 2 IP addresses (2 hosts up) scanned in 14.50 seconds
+
+FULL_CONNECT_SCAN
+root@kali:~# nmap -sT 192.168.56.102 192.168.56.103 -p 1-5000
+Starting Nmap 7.70 ( https://nmap.org ) at 2018-11-11 15:31 EST
+Nmap scan report for 192.168.56.102
+Host is up (0.011s latency).
+Not shown: 4998 closed ports
+PORT     STATE SERVICE
+1112/tcp open  msql
+1839/tcp open  netopia-vo1
+MAC Address: 08:00:27:5D:F8:9C (Oracle VirtualBox virtual NIC)
+
+Nmap scan report for 192.168.56.103
+Host is up (0.015s latency).
+Not shown: 4998 closed ports
+PORT     STATE SERVICE
+4443/tcp open  pharos
+4445/tcp open  upnotifyp
+MAC Address: 08:00:27:E0:60:7C (Oracle VirtualBox virtual NIC)
+
+Nmap done: 2 IP addresses (2 hosts up) scanned in 14.57 seconds
+
+UDP SCANS
+root@kali:~# nmap -sU 192.168.56.102 192.168.56.103 -p 1-150
+Starting Nmap 7.70 ( https://nmap.org ) at 2018-11-11 15:35 EST
+Nmap scan report for 192.168.56.102
+Host is up (0.0012s latency).
+Not shown: 147 closed ports
+PORT    STATE         SERVICE
+68/udp  open|filtered dhcpc
+104/udp open          acr-nema
+105/udp open          csnet-ns
+MAC Address: 08:00:27:5D:F8:9C (Oracle VirtualBox virtual NIC)
+
+Nmap scan report for 192.168.56.103
+Host is up (0.0013s latency).
+Not shown: 147 closed ports
+PORT    STATE         SERVICE
+68/udp  open|filtered dhcpc
+104/udp open          acr-nema
+105/udp open          csnet-ns
+MAC Address: 08:00:27:E0:60:7C (Oracle VirtualBox virtual NIC)
+
+Nmap done: 2 IP addresses (2 hosts up) scanned in 169.45 seconds
