@@ -7,12 +7,24 @@
 Reads in a PCAP file and determines the number of port scans attempted by port scan type.
 
 Program assumptions:
-- Ports scanned by different IP addresses count as individual occurrences
+- Sample destination ports scanned by different IP addresses count as individual occurrences
 - It is impossible to tell the difference between a Half-SYN and Full-SYN scan unless a connection is established.
-  Only if full TCP handshake is successfully detected will the scans from that IP address be considered a full-scan.
+  The only way to tell the difference is to detect a half-scan or full-connect occurrences.  Whichever one has more
+  detections will be added to the detected closed port scans.
 - The pcap only contains ethernet packets
 - Each port scanned by the given type of port scan is only counted once, even if it occurs in the same scan type
   multiple times
+- Once a ip address is marked as suspicious, any traffic that matches expected port scan type
+  characteristics is considered a port scan. The possibility for false positives is high in a real-world setting.
+
+
+- Each port scan type determinator is a two step algorithm:
+    1.  Using heuristics (number of occurrences of a TCP packet with a specific flag type from one source in a time
+        window, or number of UDP/ICMP packets from a source with more than a set number of unique ports within a time
+        frame), determines if a source ip address is suspicious
+    2. Generates a TCP conversation looking for expected sent and received packets using absolute time ordering
+        to determine a port scan that revealed an open or closed port, OR
+       Counts ICMP packets and unique destination IP and destination ports to determine port scan results.
 
 """
 
@@ -21,17 +33,18 @@ import dpkt
 import socket
 from collections import defaultdict
 
-# Accessors for tcp packet list (these values represent a single tcp packet)
+# Accessors for packet list (these values together represent a single tcp/udp packet)
 TIMESTAMP = 0
 SOURCE_IP = 1
 SOURCE_PORT = 2
 DESTINATION_IP = 3
 DESTINATION_PORT = 4
+# Notice how these are interchangable depending on the packet type!
 TCP_FLAGS = 5
 UDP_INFO = 5
 ALREADY_PROCESSED = 6
 
-# Flag arrays indices for accessing
+# TCP Flag buffer access indicies
 FIN_INDEX = 0
 SYN_INDEX = 1
 RST_INDEX = 2
@@ -41,20 +54,26 @@ URG_INDEX = 5
 ECE_INDEX = 6
 CWR_INDEX = 7
 
+# From left to right, the boolean representation of a particular kind of TCP packet's tcp flag settings
 SYN_TYPE = [False, True, False, False, False, False, False, False]
 RST_ACK_TYPE = [False, False, True, False, True, False, False, False]
 SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
 NULL_TYPE = [False, False, False, False, False, False, False, False]
 XMAS_TYPE = [True, False, False, True, False, True, False, False]
 
-SAMPLING_INVERVAL_SEC = 0.05
+# The sampling interval for a TCP stream
+SAMPLING_INVERVAL_SEC = 0.1
 
+# Within the sampling interval, the number of packet of a type before the ip is marked as suspicious
 SYN_PACKETS_VOLUME = 5
 NULL_PACKETS_VOLUME = 5
 XMAS_PACKETS_VOLUME = 5
 
-UDP_SAMPLING_INTERVAL_SEC = 5
-ICMP_UNIQUE_PORTS_VOLUME = 2
+# The sampling interval for a UDP stream
+UDP_SAMPLING_INTERVAL_SEC = 4
+
+# Within the sampling interval, the number of packet type before the ip is marked as suspicious
+ICMP_UNIQUE_PORTS_VOLUME = 4
 UDP_UNIQUE_PORTS_VOLUME = 3
 
 
@@ -62,7 +81,7 @@ def main():
     """
     Main program.
 
-    :return: 0 If no errors occured, 1 if the program did not complete successfully.
+    :return: 0 If no errors occurred, 1 if the program did not complete successfully.
     """
     # Get file name from command line options
     file_name = create_cmd_options()
@@ -104,6 +123,7 @@ def main():
                 else:
                     printable_connect = full_tcp_scans + closed_tcp_port_scans
 
+                # Print the output
                 print_output(num_null_scans, num_xmas_scans, num_udp_scans, printable_half, printable_connect)
             else:
                 raise IOError()
@@ -114,7 +134,7 @@ def main():
 
 def process(pcap_reader):
     """
-    Process packets and group them into hashes by a stable combination of their destination and source ip addresses
+    Process packets and group them into hashes by a stable combination of their destination and source ip addresses.
     These groupings represent all packets between two ip addresses.
 
     :param pcap_reader: An instance of a PCAP reader from dpt
@@ -149,11 +169,13 @@ def process(pcap_reader):
                 [ts, socket.inet_ntoa(ip_packet.src), ip_packet.data.sport, socket.inet_ntoa(ip_packet.dst),
                  ip_packet.data.dport, create_tcp_flag_array(ip_packet.data), False])
 
+        # Creates a UDP packet
         elif protocol == dpkt.ip.IP_PROTO_UDP:
             key = get_key(socket.inet_ntoa(ip_packet.src), socket.inet_ntoa(ip_packet.dst))
             udp_packets[key].append(
                 [ts, socket.inet_ntoa(ip_packet.src), ip_packet.data.sport, socket.inet_ntoa(ip_packet.dst),
                  ip_packet.data.dport, (protocol, -1, -1), False])
+        # Creates a ICMP packet
         elif protocol == dpkt.ip.IP_PROTO_ICMP:
             key = get_key(socket.inet_ntoa(ip_packet.src), socket.inet_ntoa(ip_packet.dst))
             icmp = ip_packet.data
@@ -161,6 +183,10 @@ def process(pcap_reader):
                 if icmp.data.data is not None:
                     if icmp.data.data.data is not None:
                         try:
+                            # Notice how tricky this is.  The kind of ICMP packet we're looking for in the traffic
+                            # will have a data entry in the ICMP envelope that is a mirror image of the packet that
+                            # failed, because ICMP is Network (not Transport) generated message. Grab the information
+                            # we need from there
                             dst_ip = socket.inet_ntoa(icmp.data.data.dst)
                             src_ip = socket.inet_ntoa(icmp.data.data.src)
                             dst_port = icmp.data.data.data.dport
@@ -184,60 +210,66 @@ def process(pcap_reader):
 #####################     SCAN TYPE DETERMINATORS   #############################################
 
 def get_num_udp_scans(udp_packets):
-    suspects = defaultdict(list)
-    ip_to_ports_scanned = defaultdict(list)
+    """
+    Calculates the number of UDP port scans occured in a given buffer of packets.
+    :param udp_packets: Packets to parse.
+    :return: The number of port scans that occured with in the buffer of packets.
+    """
+    suspects = []
+    open_ports = 0
+    closed_ports = 0
+    ports_already_seen = []
 
-    udp_closed = 0
-    udp_open = 0
-
+    # For each macro-conversation (conversation between two ip addresses without consideration to port)
     for key in udp_packets:
+        # Break the packets into time slices
         packets_by_thresholds = breakup_packets_by_threshold(udp_packets[key], UDP_SAMPLING_INTERVAL_SEC)
         if len(packets_by_thresholds) > 0:
             for ip_src in packets_by_thresholds:
                 packets_by_timeslice, left_overs = packets_by_thresholds[ip_src]
                 if len(packets_by_timeslice) > 0:
+                    # For each packet grouping by timeslice
                     for packet_group in packets_by_timeslice:
+                        # Determine the number of ICMP type 3 code 3 packets we received
                         num_unique_icmp_ports = num_unique_icmp_ports_not_found(packet_group)
 
-                        if len(num_unique_icmp_ports) > ICMP_UNIQUE_PORTS_VOLUME:
+                        # Consider the ip suspcicious if the volume is met
+                        if num_unique_icmp_ports > ICMP_UNIQUE_PORTS_VOLUME:
                             if ip_src not in suspects:
-                                suspects[ip_src] = num_unique_icmp_ports
-                            else:
-                                for port in num_unique_icmp_ports:
-                                    if port not in suspects[ip_src]:
-                                        suspects[ip_src].append(port)
-
+                                suspects.append(ip_src)
+                        # Determine the number of unique ports to a source sent to a destination ip and port
                         num_unique_ports = num_unique_udp_ports(packet_group)
-                        if len(num_unique_ports) > UDP_UNIQUE_PORTS_VOLUME:
+                        # If the threshold is met, mark as suspicious
+                        if num_unique_ports > UDP_UNIQUE_PORTS_VOLUME:
                             if ip_src not in suspects:
-                                suspects[ip_src] = num_unique_ports
-                            else:
-                                for port in num_unique_ports:
-                                    if port not in suspects[ip_src]:
-                                        suspects[ip_src].append(port)
-                if len(left_overs) > 0:
-                    num_unique_icmp_ports = num_unique_icmp_ports_not_found(left_overs)
-                    if ip_src in suspects:
-                        for port in num_unique_icmp_ports:
-                            if port not in suspects[ip_src]:
-                                suspects[ip_src].append(port)
+                                suspects.append(ip_src)
 
-                    uniqe_pts = num_unique_udp_ports(left_overs)
-                    if ip_src in suspects:
-                        for port in uniqe_pts:
-                            if port not in suspects[ip_src]:
-                                suspects[ip_src].append(port)
+        # For all packets from each suspicious IP address, count the number of ICMP type 3 code 3 and
+        # UDP destination IPs and ports the suspicious IP address sent information to.
+        for ip_addr in suspects:
+            packets = find_packets_by_source_ip(udp_packets[key], ip_addr)
 
-    total = 0
-    for entries in suspects:
-        total += len(suspects[entries])
-    return total
+            for packet in packets:
+                if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_ICMP:
+                    if packet[UDP_INFO][1] == 3 and packet[UDP_INFO][2] == 3:
+                        entry = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                        if entry not in ports_already_seen:
+                            ports_already_seen.append(entry)
+                            closed_ports += 1
 
+            for packet in packets:
+                if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_UDP:
+                    entry = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
+                    if entry not in ports_already_seen:
+                        ports_already_seen.append(entry)
+                        open_ports += 1
+
+    return open_ports + closed_ports
 
 
 def get_num_xmas_scans(tcp_packets):
     """
-    Gets the number unique ports scanned by a null scans
+    Gets the number unique ports scanned by a xmas scans
 
     :param tcp_packets: The dictionary of tcp packets discovered in the pcap file
     :return: Number of ports scanned by doing by a null scan
@@ -247,6 +279,9 @@ def get_num_xmas_scans(tcp_packets):
 
     suspects = []
     ip_to_ports_scanned = defaultdict(list)
+    # Divide the ordered packet lists into thresholds, and measure how many packets were sent from a source
+    # ip with the XMAS flags set.  If the volume is over the expected number of packets of that type in a time
+    # interval, then mark the IP address as suspect.
     for key in tcp_packets:
         packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key], SAMPLING_INVERVAL_SEC)
         if len(packets_by_thresholds) > 0:
@@ -259,6 +294,8 @@ def get_num_xmas_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
+        # For each suspect in the list, if the packet has not been parsed already, build a conversation,
+        # and discern between the conversation's open and closed ports revealed by the XMAS scan.
         for ip_addr in suspects:
             packets_from_ip = find_packets_by_source_ip(tcp_packets[key], ip_addr)
             for packet in packets_from_ip:
@@ -293,7 +330,8 @@ def get_num_syn_scans(tcp_packets):
     Gets the number unique ports scanned by a full_scan or half_scan port scan type
 
     :param tcp_packets: The dictionary of tcp packets discovered in the pcap file
-    :return: Number of ports scanned by doing a full TCP handshake, Number of ports scanned using half-scan techniques
+    :return: Number of ports scanned but were closed, Number of ports scanned by doing a full TCP handshake,
+            Number of ports scanned using half-scan techniques
     """
 
     closed_ports = 0
@@ -302,6 +340,9 @@ def get_num_syn_scans(tcp_packets):
 
     suspects = []
     ip_to_ports_scanned = defaultdict(list)
+    # Divide the ordered packet lists into thresholds, and measure how many packets were sent from a source
+    # ip with the SYN flag set.  If the volume is over the expected number of packets of that type in a time
+    # interval, then mark the IP address as suspect.
     for key in tcp_packets:
         packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key], SAMPLING_INVERVAL_SEC)
         if len(packets_by_thresholds) > 0:
@@ -314,6 +355,10 @@ def get_num_syn_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
+
+        # For each suspect list, if the packet has not been parsed already, build a conversation,
+        # and discern between the conversation's open and closed ports revealed by
+        # either a half-open or full-connect scan.
         for ip_addr in suspects:
             packets_from_ip = find_packets_by_source_ip(tcp_packets[key], ip_addr)
             for packet in packets_from_ip:
@@ -328,6 +373,8 @@ def get_num_syn_scans(tcp_packets):
 
                     conversation = generate_tcp_conversation(from_source, from_destination)
 
+                    # Determine if the scan is a a full connect scan, half scan, or a nondiscernable closed scan
+                    # (ie, the port was closed so who the heck knows)
                     if is_full_port_scan(conversation):
                         to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
                         if to_store not in ip_to_ports_scanned[ip_addr]:
@@ -364,6 +411,9 @@ def get_num_null_scans(tcp_packets):
 
     suspects = []
     ip_to_ports_scanned = defaultdict(list)
+    # Divide the ordered packet lists into thresholds, and measure how many packets were sent from a source
+    # ip with no flags set.  If the volume is over the expected number of packets of that type in a time
+    # interval, then mark the IP address as suspect.
     for key in tcp_packets:
         packets_by_thresholds = breakup_packets_by_threshold(tcp_packets[key], SAMPLING_INVERVAL_SEC)
         if len(packets_by_thresholds) > 0:
@@ -376,6 +426,8 @@ def get_num_null_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
+        # For each suspect in the list, if the packet has not been parsed already, build a conversation,
+        # and discern between the conversation's open and closed ports revealed by the null scan.
         for ip_addr in suspects:
             packets_from_ip = find_packets_by_source_ip(tcp_packets[key], ip_addr)
             for packet in packets_from_ip:
@@ -407,45 +459,13 @@ def get_num_null_scans(tcp_packets):
 
 ########################   PACKET PARSING HELPERS ############################################
 
-def udp_port_closed(conversation):
-    icmps = []
-    udps = []
-
-    for packet in conversation:
-        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_UDP:
-            udps.append(udps)
-
-    for packet in conversation:
-        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_ICMP:
-            if packet[UDP_INFO][1] == 3 and packet[UDP_INFO][2] == 3:
-                icmps.append(packet)
-
-    if len(udps) > 0 and len(icmps) > 0:
-        return True
-
-    return False
-
-
-def udp_port_open(conversation):
-    icmps = []
-    udps = []
-
-    for packet in conversation:
-        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_UDP:
-            udps.append(udps)
-
-    for packet in conversation:
-        if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_ICMP:
-            if packet[UDP_INFO][1] == 3 and packet[UDP_INFO][2] == 3:
-                icmps.append(packet)
-
-    if len(udps) > 0 and len(icmps) == 0:
-        return True
-
-    return False
-
 
 def is_open_xmas_scan(conversation):
+    """
+    Determines if a conversation between two sockets contains an open port from the XMAS scan.
+    :param conversation: The ordered packets between two sockets across the network.
+    :return: True if the port scan revealed an open port.
+    """
     has_null = []
     has_rst = []
 
@@ -464,6 +484,11 @@ def is_open_xmas_scan(conversation):
 
 
 def is_closed_xmas_scan(conversation):
+    """
+    Determines if a conversation between two sockets contains a closed port from the XMAS scan.
+    :param conversation: The ordered packets between two sockets across the network.
+    :return: True if the port scan revealed a closed port.
+    """
     has_null = []
     has_rst = []
 
@@ -483,6 +508,11 @@ def is_closed_xmas_scan(conversation):
 
 
 def is_open_null_scan(conversation):
+    """
+    Determines if a conversation between two sockets contains an open port from the null scan.
+    :param conversation: The ordered packets between two sockets across the network.
+    :return: True if the port scan revealed an open port.
+    """
     has_null = []
     has_rst = []
 
@@ -501,6 +531,11 @@ def is_open_null_scan(conversation):
 
 
 def is_closed_null_scan(conversation):
+    """
+    Determines if a conversation between two sockets contains an closed port from the null scan.
+    :param conversation: The ordered packets between two sockets across the network.
+    :return: True if the port scan revealed a closed port.
+    """
     has_null = []
     has_rst = []
 
@@ -520,6 +555,11 @@ def is_closed_null_scan(conversation):
 
 
 def is_full_port_scan(conversation):
+    """
+    Determines if a conversation between two sockets contains an open port from a full-connect SYN scan.
+    :param conversation: The ordered packets between two sockets across the network.
+    :return: True if the port scan revealed an open port.
+    """
     has_syn = []
     has_rst = []
     has_syn_ack = []
@@ -558,6 +598,11 @@ def is_full_port_scan(conversation):
 
 
 def is_half_port_scan(conversation):
+    """
+    Determines if a conversation between two sockets contains an open port from a half-open SYN scan.
+    :param conversation: The ordered packets between two sockets across the network.
+    :return: True if the port scan revealed an open port.
+    """
     has_syn = []
     has_rst = []
     has_syn_ack = []
@@ -587,6 +632,11 @@ def is_half_port_scan(conversation):
 
 
 def is_closed_port_scan(conversation):
+    """
+    Determines if a conversation between two sockets contains an open port from a closed SYN scan
+    :param conversation: The ordered packets between two sockets across the network.
+    :return: True if the port scan revealed a closed port.
+    """
     has_syn = []
     has_rst_ack = []
 
@@ -608,11 +658,20 @@ def is_closed_port_scan(conversation):
 
 
 def mark_as_processed(conversation):
+    """
+    Marks the given conversation's packets as already processed (dirty) to avoid duplicating parsing.
+    :param conversation: The conversation of ordered packets between two network sockets.
+    """
     for packet in conversation:
         packet[ALREADY_PROCESSED] = True
 
 
 def get_syn_number(packets):
+    """
+    Gets number of syn packets from a list of packets
+    :param packets: The packets
+    :return: Number of SYN packets
+    """
     num_syn_packs = 0
     if len(packets) > 0:
         for packet in packets:
@@ -622,6 +681,11 @@ def get_syn_number(packets):
 
 
 def get_null_number(packets):
+    """
+    Gets number of null packets from a list of packets
+    :param packets: The packets
+    :return: Number of null packets
+    """
     num_syn_packs = 0
     if len(packets) > 0:
         for packet in packets:
@@ -631,18 +695,28 @@ def get_null_number(packets):
 
 
 def num_unique_icmp_ports_not_found(packets):
+    """
+    Gets the number of unique destinations and ports from ICMP type 3 code 3 packets
+    :param packets: The packets in a group.
+    :return: The number of unique ICMP type 3 code 3 packets found in the list of packets.
+    """
     ports_seen = []
     if len(packets) > 0:
         for packet in packets:
             if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_ICMP:
                 if packet[UDP_INFO][1] == 3 and packet[UDP_INFO][2] == 3:
                     entry = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
-                    if not entry in ports_seen:
+                    if entry not in ports_seen:
                         ports_seen.append(entry)
-        return ports_seen
+        return len(ports_seen)
 
 
 def num_unique_udp_ports(packets):
+    """
+    Gets the number of unique destinations and ports from UDP packets
+    :param packets: The packets in a group.
+    :return: The number of unique UDP packets found in the list of packets.
+    """
     ports_seen = []
     if len(packets) > 0:
         for packet in packets:
@@ -650,10 +724,15 @@ def num_unique_udp_ports(packets):
             if entry not in ports_seen:
                 ports_seen.append(entry)
 
-    return ports_seen
+    return len(ports_seen)
 
 
 def get_xmas_number(packets):
+    """
+    Gets the number of XMAS flagged packets from a list of packets.
+    :param packets: The list of packets.
+    :return: Number of XMAS flagged tcp packets from the list.
+    """
     num_syn_packs = 0
     if len(packets) > 0:
         for packet in packets:
@@ -663,6 +742,12 @@ def get_xmas_number(packets):
 
 
 def breakup_packets_by_threshold(tcp_packets, sampling_interval):
+    """
+    Given an interval, break up packets by timeslices.
+    :param tcp_packets: The packets to break up in a provided interval.
+    :param sampling_interval: The interval in seconds.
+    :return: Packets divided up by time slice, and any left overs.
+    """
     ip_addresses = get_all_ip_addresses(tcp_packets)
     ip_to_time_slices = defaultdict(list)
     for ip_address in ip_addresses:
@@ -726,6 +811,12 @@ def find_packets_by_ip_port(tcp_packets, source_ip, source_port, destination_ip,
 
 
 def find_packets_by_source_ip(tcp_packets, ip):
+    """
+    Finds packets in a list by source ip
+    :param tcp_packets: The list of packets.
+    :param ip: The source ip desired used as matching characteristics.
+    :return: Packets from the provided source.
+    """
     found = []
     for packet in tcp_packets:
         if packet[SOURCE_IP] == ip:
@@ -734,6 +825,11 @@ def find_packets_by_source_ip(tcp_packets, ip):
 
 
 def get_all_ip_addresses(tcp_packets):
+    """
+    Gets all participating IP address from a group of packets.
+    :param tcp_packets: The packets.
+    :return: All IP addresses participating in the list of packets.
+    """
     found = []
     for packet in tcp_packets:
         if packet[SOURCE_IP] not in found:
