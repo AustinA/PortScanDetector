@@ -301,13 +301,10 @@ def get_num_xmas_scans(tcp_packets):
             for packet in packets_from_ip:
 
                 if not packet[ALREADY_PROCESSED]:
-                    from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
-                                                          packet[DESTINATION_IP], packet[DESTINATION_PORT])
-                    from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
-                                                               packet[DESTINATION_PORT],
-                                                               packet[SOURCE_IP], packet[SOURCE_PORT])
+                    unordered_convo = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
+                                                              packet[DESTINATION_IP], packet[DESTINATION_PORT])
 
-                    conversation = generate_tcp_conversation(from_source, from_destination)
+                    conversation = generate_tcp_conversation(unordered_convo)
 
                     if is_closed_xmas_scan(conversation):
                         to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
@@ -365,15 +362,13 @@ def get_num_syn_scans(tcp_packets):
 
                 if not packet[ALREADY_PROCESSED]:
 
-                    from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
-                                                          packet[DESTINATION_IP], packet[DESTINATION_PORT])
-                    from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
-                                                               packet[DESTINATION_PORT],
-                                                               packet[SOURCE_IP], packet[SOURCE_PORT])
+                    unordered_conversation = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP],
+                                                                     packet[SOURCE_PORT],
+                                                                     packet[DESTINATION_IP], packet[DESTINATION_PORT])
 
-                    conversation = generate_tcp_conversation(from_source, from_destination)
+                    conversation = generate_tcp_conversation(unordered_conversation)
 
-                    # Determine if the scan is a a full connect scan, half scan, or a nondiscernable closed scan
+                    # Determine if the scan is a a full connect scan, half scan, or a non-discernable closed scan
                     # (ie, the port was closed so who the heck knows)
                     if is_full_port_scan(conversation):
                         to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
@@ -433,13 +428,11 @@ def get_num_null_scans(tcp_packets):
             for packet in packets_from_ip:
 
                 if not packet[ALREADY_PROCESSED]:
-                    from_source = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP], packet[SOURCE_PORT],
-                                                          packet[DESTINATION_IP], packet[DESTINATION_PORT])
-                    from_destination = find_packets_by_ip_port(tcp_packets[key], packet[DESTINATION_IP],
-                                                               packet[DESTINATION_PORT],
-                                                               packet[SOURCE_IP], packet[SOURCE_PORT])
+                    unordered_conversation = find_packets_by_ip_port(tcp_packets[key], packet[SOURCE_IP],
+                                                                     packet[SOURCE_PORT],
+                                                                     packet[DESTINATION_IP], packet[DESTINATION_PORT])
 
-                    conversation = generate_tcp_conversation(from_source, from_destination)
+                    conversation = generate_tcp_conversation(unordered_conversation)
 
                     if is_closed_null_scan(conversation):
                         to_store = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
@@ -473,7 +466,6 @@ def is_open_xmas_scan(conversation):
         if packet[TCP_FLAGS] == XMAS_TYPE:
             has_null.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][RST_INDEX] is True:
             has_rst.append(packet)
 
@@ -496,7 +488,6 @@ def is_closed_xmas_scan(conversation):
         if packet[TCP_FLAGS] == XMAS_TYPE:
             has_null.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][RST_INDEX] is True:
             has_rst.append(packet)
 
@@ -520,7 +511,6 @@ def is_open_null_scan(conversation):
         if packet[TCP_FLAGS] == NULL_TYPE:
             has_null.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][RST_INDEX] is True:
             has_rst.append(packet)
 
@@ -543,7 +533,6 @@ def is_closed_null_scan(conversation):
         if packet[TCP_FLAGS] == NULL_TYPE:
             has_null.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][RST_INDEX] is True:
             has_rst.append(packet)
 
@@ -569,15 +558,12 @@ def is_full_port_scan(conversation):
         if packet[TCP_FLAGS] == SYN_TYPE:
             has_syn.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][SYN_INDEX] is True and packet[TCP_FLAGS][ACK_INDEX] is True:
             has_syn_ack.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][RST_INDEX] == 1:
             has_rst.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][ACK_INDEX] is True and packet[TCP_FLAGS][SYN_INDEX] is not True:
             has_ack.append(packet)
 
@@ -611,11 +597,9 @@ def is_half_port_scan(conversation):
         if packet[TCP_FLAGS] == SYN_TYPE:
             has_syn.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][SYN_INDEX] is True and packet[TCP_FLAGS][ACK_INDEX] is True:
             has_syn_ack.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][RST_INDEX] == 1:
             has_rst.append(packet)
 
@@ -644,7 +628,6 @@ def is_closed_port_scan(conversation):
         if packet[TCP_FLAGS] == SYN_TYPE:
             has_syn.append(packet)
 
-    for packet in conversation:
         if packet[TCP_FLAGS][RST_INDEX] == 1:
             has_rst_ack.append(packet)
 
@@ -806,6 +789,9 @@ def find_packets_by_ip_port(tcp_packets, source_ip, source_port, destination_ip,
         if ((packet[SOURCE_IP] == source_ip) and (packet[SOURCE_PORT] == source_port)
                 and (packet[DESTINATION_IP] == destination_ip) and (packet[DESTINATION_PORT] == destination_port)):
             found.append(packet)
+        elif ((packet[DESTINATION_IP] == source_ip) and (packet[DESTINATION_PORT] == source_port)
+              and (packet[SOURCE_IP] == destination_ip) and (packet[SOURCE_PORT] == destination_port)):
+            found.append(packet)
 
     return found
 
@@ -934,12 +920,11 @@ def reset_already_processed_flags(packet_dict):
             packet[ALREADY_PROCESSED] = False
 
 
-def generate_tcp_conversation(from_source, from_destination):
+def generate_tcp_conversation(from_source):
     """
     Create a conversation (packets between two ip addresses in time stamp order
 
-    :param from_source: Packets from the source ip
-    :param from_destination: Packets from the destination ip
+    :param from_source: Unordered packet conversation
     :return: List of packets in conversation
     """
     # Create a ordered conversation between packets based on the information from the selected packet
@@ -947,9 +932,6 @@ def generate_tcp_conversation(from_source, from_destination):
     for x in from_source:
         if not x[ALREADY_PROCESSED]:
             conversation.append(x)
-    for y in from_destination:
-        if not y[ALREADY_PROCESSED]:
-            conversation.append(y)
     conversation.sort(key=lambda x: x[0])
     return conversation
 
