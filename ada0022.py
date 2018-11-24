@@ -43,6 +43,7 @@ DESTINATION_PORT = 4
 TCP_FLAGS = 5
 UDP_INFO = 5
 ALREADY_PROCESSED = 6
+DATA_PACKET_LENGTH = 7
 
 # TCP Flag buffer access indicies
 FIN_INDEX = 0
@@ -161,20 +162,23 @@ def process(pcap_reader):
         if protocol == dpkt.ip.IP_PROTO_TCP:
             # Generate a stable unique key for the packet
             key = get_key(socket.inet_ntoa(ip_packet.src), socket.inet_ntoa(ip_packet.dst))
-
             # Create an entity list representing the pertinent information of the packet
             # A TCP packet in this program looks like this:
             # [source ip, source port, destination ip, destination port, tcp flags, parsed status of the packet]
+            tcp_packet = ip_packet.data
+            length_tcp_payload = len(tcp_packet.data)
             tcp_packets[key].append(
                 [ts, socket.inet_ntoa(ip_packet.src), ip_packet.data.sport, socket.inet_ntoa(ip_packet.dst),
-                 ip_packet.data.dport, create_tcp_flag_array(ip_packet.data), False])
+                 ip_packet.data.dport, create_tcp_flag_array(ip_packet.data), False, length_tcp_payload])
 
         # Creates a UDP packet
         elif protocol == dpkt.ip.IP_PROTO_UDP:
             key = get_key(socket.inet_ntoa(ip_packet.src), socket.inet_ntoa(ip_packet.dst))
+            udp_packet = ip_packet.data
+            length_udp_payload = len(udp_packet.data)
             udp_packets[key].append(
                 [ts, socket.inet_ntoa(ip_packet.src), ip_packet.data.sport, socket.inet_ntoa(ip_packet.dst),
-                 ip_packet.data.dport, (protocol, -1, -1), False])
+                 ip_packet.data.dport, (protocol, -1, -1), False, length_udp_payload])
         # Creates a ICMP packet
         elif protocol == dpkt.ip.IP_PROTO_ICMP:
             key = get_key(socket.inet_ntoa(ip_packet.src), socket.inet_ntoa(ip_packet.dst))
@@ -193,7 +197,7 @@ def process(pcap_reader):
                             src_port = icmp.data.data.data.sport
                             udp_packets[key].append(
                                 [ts, src_ip, src_port, dst_ip,
-                                 dst_port, (protocol, icmp.type, icmp.code), False])
+                                 dst_port, (protocol, icmp.type, icmp.code), False, -1])
                         except:
                             pass
 
@@ -243,6 +247,21 @@ def get_num_udp_scans(udp_packets):
                         if num_unique_ports > UDP_UNIQUE_PORTS_VOLUME:
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
+                elif len(left_overs) > 0:
+
+                    # Number of unique udp ICMP not found ports
+                    num_unique_icmp_ports = num_unique_icmp_ports_not_found(left_overs)
+
+                    if (num_unique_icmp_ports > ICMP_UNIQUE_PORTS_VOLUME):
+                        if ip_src not in suspects:
+                            suspects.append(ip_src)
+
+                    num_unique_ports = num_unique_udp_ports(left_overs)
+
+                    if (num_unique_ports > UDP_UNIQUE_PORTS_VOLUME):
+                        if ip_src not in suspects:
+                            suspects.append(ip_src)
+
 
         # For all packets from each suspicious IP address, count the number of ICMP type 3 code 3 and
         # UDP destination IPs and ports the suspicious IP address sent information to.
@@ -261,8 +280,9 @@ def get_num_udp_scans(udp_packets):
                 if packet[UDP_INFO][0] == dpkt.ip.IP_PROTO_UDP:
                     entry = (packet[DESTINATION_IP], packet[DESTINATION_PORT])
                     if entry not in ports_already_seen:
-                        ports_already_seen.append(entry)
-                        open_ports += 1
+                        if packet[DATA_PACKET_LENGTH] == 0:
+                            ports_already_seen.append(entry)
+                            open_ports += 1
 
     return open_ports + closed_ports
 
@@ -294,6 +314,13 @@ def get_num_xmas_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
+                elif len(left_overs) > 0:
+                    num_xmas_packs = get_xmas_number(left_overs)
+                    if num_xmas_packs > XMAS_PACKETS_VOLUME:
+                        if ip_src not in suspects:
+                            suspects.append(ip_src)
+                            break
+
         # For each suspect in the list, if the packet has not been parsed already, build a conversation,
         # and discern between the conversation's open and closed ports revealed by the XMAS scan.
         for ip_addr in suspects:
@@ -352,6 +379,12 @@ def get_num_syn_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
+                elif len(left_overs) > 0:
+                    num_syn_packs = get_syn_number(left_overs)
+                    if num_syn_packs > SYN_PACKETS_VOLUME:
+                        if ip_src not in suspects:
+                            suspects.append(ip_src)
+                            break
 
         # For each suspect list, if the packet has not been parsed already, build a conversation,
         # and discern between the conversation's open and closed ports revealed by
@@ -421,6 +454,13 @@ def get_num_null_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
+                elif len(left_overs) > 0:
+                    num_null_packs = get_null_number(left_overs)
+                    if num_null_packs > NULL_PACKETS_VOLUME:
+                        if ip_src not in suspects:
+                            suspects.append(ip_src)
+                            break
+
         # For each suspect in the list, if the packet has not been parsed already, build a conversation,
         # and discern between the conversation's open and closed ports revealed by the null scan.
         for ip_addr in suspects:
@@ -767,6 +807,8 @@ def breakup_packets_by_threshold(tcp_packets, sampling_interval):
                     packets_timesliced += len(packet_timeslices[i])
                 for i in range(packets_timesliced, len(all_packets)):
                     left_overs.append(all_packets[i])
+            else:
+                left_overs.extend(all_packets)
 
             ip_to_time_slices[ip_address] = [packet_timeslices, left_overs]
 
