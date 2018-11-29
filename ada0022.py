@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+# -*- coding: utf-8 -*-
 """                   CPE 549 Final Project
                         Austin Alderton
                     Christopher (Eric) Whatley
@@ -33,6 +33,21 @@ import dpkt
 import socket
 from collections import defaultdict
 
+# The sampling interval for a TCP stream
+SAMPLING_INVERVAL_SEC = 3
+
+# Within the sampling interval, the number of packet of a type before the ip is marked as suspicious
+SYN_PACKETS_VOLUME = 5
+NULL_PACKETS_VOLUME = 5
+XMAS_PACKETS_VOLUME = 5
+
+# The sampling interval for a UDP stream
+UDP_SAMPLING_INTERVAL_SEC = 4
+
+# Within the sampling interval, the number of packet type before the ip is marked as suspicious
+ICMP_UNIQUE_PORTS_VOLUME = 4
+UDP_UNIQUE_PORTS_VOLUME = 3
+
 # Accessors for packet list (these values together represent a single tcp/udp packet)
 TIMESTAMP = 0
 SOURCE_IP = 1
@@ -61,21 +76,6 @@ RST_ACK_TYPE = [False, False, True, False, True, False, False, False]
 SYN_ACK_TYPE = [False, True, False, False, True, False, False, False]
 NULL_TYPE = [False, False, False, False, False, False, False, False]
 XMAS_TYPE = [True, False, False, True, False, True, False, False]
-
-# The sampling interval for a TCP stream
-SAMPLING_INVERVAL_SEC = 0.1
-
-# Within the sampling interval, the number of packet of a type before the ip is marked as suspicious
-SYN_PACKETS_VOLUME = 5
-NULL_PACKETS_VOLUME = 5
-XMAS_PACKETS_VOLUME = 5
-
-# The sampling interval for a UDP stream
-UDP_SAMPLING_INTERVAL_SEC = 4
-
-# Within the sampling interval, the number of packet type before the ip is marked as suspicious
-ICMP_UNIQUE_PORTS_VOLUME = 4
-UDP_UNIQUE_PORTS_VOLUME = 3
 
 
 def main():
