@@ -38,8 +38,8 @@ SAMPLING_INVERVAL_SEC = 3
 
 # Within the sampling interval, the number of packet of a type before the ip is marked as suspicious
 SYN_PACKETS_VOLUME = 5
-NULL_PACKETS_VOLUME = 5
-XMAS_PACKETS_VOLUME = 5
+NULL_PACKETS_VOLUME = 1
+XMAS_PACKETS_VOLUME = 1
 
 # The sampling interval for a UDP stream
 UDP_SAMPLING_INTERVAL_SEC = 4
