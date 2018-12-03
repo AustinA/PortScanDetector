@@ -247,7 +247,7 @@ def get_num_udp_scans(udp_packets):
                         if num_unique_ports > UDP_UNIQUE_PORTS_VOLUME:
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
-                elif len(left_overs) > 0:
+                if len(left_overs) > 0:
 
                     # Number of unique udp ICMP not found ports
                     num_unique_icmp_ports = num_unique_icmp_ports_not_found(left_overs)
@@ -310,13 +310,13 @@ def get_num_xmas_scans(tcp_packets):
                 if len(packets_by_timeslice) > 0:
                     for packet_group in packets_by_timeslice:
                         num_xmas_packs = get_xmas_number(packet_group)
-                        if num_xmas_packs > XMAS_PACKETS_VOLUME:
+                        if num_xmas_packs >= XMAS_PACKETS_VOLUME:
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
-                elif len(left_overs) > 0:
+                if len(left_overs) > 0:
                     num_xmas_packs = get_xmas_number(left_overs)
-                    if num_xmas_packs > XMAS_PACKETS_VOLUME:
+                    if num_xmas_packs >= XMAS_PACKETS_VOLUME:
                         if ip_src not in suspects:
                             suspects.append(ip_src)
                             break
@@ -379,7 +379,7 @@ def get_num_syn_scans(tcp_packets):
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
-                elif len(left_overs) > 0:
+                if len(left_overs) > 0:
                     num_syn_packs = get_syn_number(left_overs)
                     if num_syn_packs > SYN_PACKETS_VOLUME:
                         if ip_src not in suspects:
@@ -450,13 +450,13 @@ def get_num_null_scans(tcp_packets):
                 if len(packets_by_timeslice) > 0:
                     for packet_group in packets_by_timeslice:
                         num_null_packs = get_null_number(packet_group)
-                        if num_null_packs > NULL_PACKETS_VOLUME:
+                        if num_null_packs >= NULL_PACKETS_VOLUME:
                             if ip_src not in suspects:
                                 suspects.append(ip_src)
                                 break
-                elif len(left_overs) > 0:
+                if len(left_overs) > 0:
                     num_null_packs = get_null_number(left_overs)
-                    if num_null_packs > NULL_PACKETS_VOLUME:
+                    if num_null_packs >= NULL_PACKETS_VOLUME:
                         if ip_src not in suspects:
                             suspects.append(ip_src)
                             break
